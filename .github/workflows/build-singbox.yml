@@ -80,10 +80,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { goos: linux, goarch: amd64, output: linux-amd64, ext: "" }
-          - { goos: linux, goarch: arm64, output: linux-arm64, ext: "" }
-          - { goos: windows, goarch: amd64, output: windows-amd64, ext: ".exe" }
-          - { goos: windows, goarch: arm64, output: windows-arm64, ext: ".exe" }
+          - { goos: linux, goarch: amd64, goamd64: v1, output: linux-amd64-v1, ext: "" }
+          - { goos: linux, goarch: amd64, goamd64: v2, output: linux-amd64-v2, ext: "" }
+          - { goos: linux, goarch: amd64, goamd64: v3, output: linux-amd64-v3, ext: "" }
+          - { goos: linux, goarch: arm64, goamd64: "", output: linux-arm64, ext: "" }
+          - { goos: windows, goarch: amd64, goamd64: v1, output: windows-amd64-v1, ext: ".exe" }
+          - { goos: windows, goarch: amd64, goamd64: v2, output: windows-amd64-v2, ext: ".exe" }
+          - { goos: windows, goarch: amd64, goamd64: v3, output: windows-amd64-v3, ext: ".exe" }
+          - { goos: windows, goarch: arm64, goamd64: "", output: windows-arm64, ext: ".exe" }
 
     steps:
       - uses: actions/checkout@v6
@@ -128,8 +132,12 @@ jobs:
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          GOAMD64_VARIANT: ${{ matrix.goamd64 }}
         run: |
           mkdir -p dist
+          if [ -n "${GOAMD64_VARIANT}" ] && [ "${GOAMD64_VARIANT}" != "null" ]; then
+            export GOAMD64="${GOAMD64_VARIANT}"
+          fi
           go build -v -tags "with_gvisor with_singbox" -trimpath \
             -ldflags "-extldflags --static -X 'github.com/metacubex/mihomo/constant.Version=${RELEASE_VERSION}' -X 'github.com/metacubex/mihomo/constant.BuildTime=${BUILDTIME}' -w -s -buildid=" \
             -o "dist/mihomo-singbox-${{ matrix.output }}${{ matrix.ext }}"
@@ -139,7 +147,7 @@ jobs:
           if [ "${{ matrix.goos }}" = "windows" ]; then
             (cd dist && zip -9 "mihomo-singbox-${{ matrix.output }}-${RELEASE_VERSION}.zip" "mihomo-singbox-${{ matrix.output }}${{ matrix.ext }}")
           else
-            gzip -c "dist/mihomo-singbox-${{ matrix.output }}" > "dist/mihomo-singbox-${{ matrix.output }}-${RELEASE_VERSION}.gz"
+            gzip -9n -c "dist/mihomo-singbox-${{ matrix.output }}" > "dist/mihomo-singbox-${{ matrix.output }}-${RELEASE_VERSION}.gz"
           fi
 
       - name: Archive artifacts
@@ -184,4 +192,4 @@ jobs:
             build suffix: `${{ needs.meta.outputs.build_suffix }}`
             commit: `${{ github.sha }}`
 
-            This release contains sing-box subcore builds for Linux amd64/arm64 and Windows amd64/arm64.
+            This release contains sing-box subcore builds for Linux amd64 v1/v2/v3, Linux arm64, Windows amd64 v1/v2/v3, and Windows arm64.
