@@ -5,6 +5,8 @@
 *.so
 *.dylib
 bin/*
+component/subcore/singbox/assets/*
+!component/subcore/singbox/assets/README.md
 
 # Test binary, build with `go test -c`
 *.test

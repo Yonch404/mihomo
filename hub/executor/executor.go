@@ -26,6 +26,7 @@ import (
 	"github.com/metacubex/mihomo/component/resolver"
 	"github.com/metacubex/mihomo/component/resource"
 	"github.com/metacubex/mihomo/component/sniffer"
+	"github.com/metacubex/mihomo/component/subcore/singbox"
 	tlsC "github.com/metacubex/mihomo/component/tls"
 	"github.com/metacubex/mihomo/component/trie"
 	"github.com/metacubex/mihomo/component/updater"
@@ -109,6 +110,7 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	updateTun(cfg.General) // tun should not care "force"
 	updateIPTables(cfg)
 	updateTunnels(cfg.Tunnels)
+	updateSingBox(cfg.SingBox)
 
 	tunnel.OnInnerLoading()
 
@@ -369,6 +371,12 @@ func updateTunnels(tunnels []LC.Tunnel) {
 	listener.PatchTunnel(tunnels, tunnel.Tunnel)
 }
 
+func updateSingBox(c *singbox.Config) {
+	if err := singbox.Apply(c); err != nil {
+		log.Errorln("[sing-box] apply failed: %s", err.Error())
+	}
+}
+
 func updateUpdater(cfg *config.Config) {
 	general := cfg.General
 	updater.SetGeoAutoUpdate(general.GeoAutoUpdate)
@@ -533,6 +541,7 @@ func updateIPTables(cfg *config.Config) {
 }
 
 func Shutdown() {
+	singbox.Shutdown()
 	listener.Cleanup()
 	tproxy.CleanupTProxyIPTables()
 	resolver.StoreFakePoolState()

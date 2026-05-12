@@ -25,6 +25,7 @@ import (
 	"github.com/metacubex/mihomo/component/process"
 	"github.com/metacubex/mihomo/component/resolver"
 	"github.com/metacubex/mihomo/component/sniffer"
+	"github.com/metacubex/mihomo/component/subcore/singbox"
 	"github.com/metacubex/mihomo/component/trie"
 	C "github.com/metacubex/mihomo/constant"
 	P "github.com/metacubex/mihomo/constant/provider"
@@ -207,6 +208,7 @@ type Config struct {
 	Tunnels       []LC.Tunnel
 	Sniffer       *sniffer.Config
 	TLS           *TLS
+	SingBox       *singbox.Config
 }
 
 type RawCors struct {
@@ -454,6 +456,7 @@ type RawConfig struct {
 	GeoXUrl       RawGeoXUrl                `yaml:"geox-url" json:"geox-url"`
 	Sniffer       RawSniffer                `yaml:"sniffer" json:"sniffer"`
 	TLS           RawTLS                    `yaml:"tls" json:"tls"`
+	SingBox       singbox.RawConfig         `yaml:"sing-box" json:"sing-box"`
 
 	ClashForAndroid RawClashForAndroid `yaml:"clash-for-android" json:"clash-for-android"`
 }
@@ -654,6 +657,12 @@ func ParseRawConfig(rawCfg *RawConfig) (*Config, error) {
 		return nil, err
 	}
 	config.TLS = tlsCfg
+
+	singBoxCfg, err := singbox.ParseConfig(rawCfg.SingBox)
+	if err != nil {
+		return nil, err
+	}
+	config.SingBox = singBoxCfg
 
 	proxies, providers, err := parseProxies(rawCfg)
 	if err != nil {

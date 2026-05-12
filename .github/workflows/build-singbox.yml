@@ -1,0 +1,178 @@
+name: Build Sing-Box Subcore
+
+on:
+  workflow_dispatch:
+    inputs:
+      mihomo_version:
+        description: "Mihomo version. Leave empty to use current tag or constant.Version"
+        required: false
+      build_suffix:
+        description: "Build suffix. Leave empty to use b<run_number>.<attempt>"
+        required: false
+      prerelease:
+        description: "Mark the GitHub Release as prerelease"
+        required: true
+        default: false
+        type: boolean
+
+env:
+  SING_BOX_VERSION: "1.13.11"
+
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      mihomo_version: ${{ steps.version.outputs.mihomo_version }}
+      sing_box_version: ${{ steps.version.outputs.sing_box_version }}
+      build_suffix: ${{ steps.version.outputs.build_suffix }}
+      release_version: ${{ steps.version.outputs.release_version }}
+      release_tag: ${{ steps.version.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sing_box_version="${SING_BOX_VERSION#v}"
+
+          mihomo_version="${{ inputs.mihomo_version }}"
+          if [ -z "${mihomo_version}" ]; then
+            if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+              mihomo_version="${GITHUB_REF_NAME}"
+            else
+              mihomo_version="$(sed -n 's/.*Version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' constant/version.go | head -n 1)"
+            fi
+          fi
+          mihomo_version="${mihomo_version#v}"
+
+          build_suffix="${{ inputs.build_suffix }}"
+          if [ -z "${build_suffix}" ]; then
+            build_suffix="b${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+          fi
+
+          sanitize() {
+            printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^0-9a-z._-]+/-/g; s/^-+//; s/-+$//'
+          }
+
+          mihomo_version="$(sanitize "${mihomo_version}")"
+          sing_box_version="$(sanitize "${sing_box_version}")"
+          build_suffix="$(sanitize "${build_suffix}")"
+
+          release_version="${mihomo_version}-sb.${sing_box_version}-${build_suffix}"
+          release_tag="v${release_version}"
+
+          echo "mihomo_version=${mihomo_version}" >> "$GITHUB_OUTPUT"
+          echo "sing_box_version=${sing_box_version}" >> "$GITHUB_OUTPUT"
+          echo "build_suffix=${build_suffix}" >> "$GITHUB_OUTPUT"
+          echo "release_version=${release_version}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: meta
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64, output: linux-amd64, ext: "" }
+          - { goos: linux, goarch: arm64, output: linux-arm64, ext: "" }
+          - { goos: windows, goarch: amd64, output: windows-amd64, ext: ".exe" }
+          - { goos: windows, goarch: arm64, output: windows-arm64, ext: ".exe" }
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-download-base-url: "https://github.com/MetaCubeX/go/releases/download/build"
+          go-version: "1.26"
+
+      - name: Fix issue77930 for Golang1.26
+        run: |
+          cd "$(go env GOROOT)"
+          patch --verbose -p 1 < "$GITHUB_WORKSPACE/.github/patch/issue77930.patch"
+
+      - name: Set variables
+        run: |
+          echo "SING_BOX_VERSION=${{ needs.meta.outputs.sing_box_version }}" >> "$GITHUB_ENV"
+          echo "MIHOMO_VERSION=${{ needs.meta.outputs.mihomo_version }}" >> "$GITHUB_ENV"
+          echo "RELEASE_VERSION=${{ needs.meta.outputs.release_version }}" >> "$GITHUB_ENV"
+          echo "BUILDTIME=$(date)" >> "$GITHUB_ENV"
+          echo "CGO_ENABLED=0" >> "$GITHUB_ENV"
+          echo "GOTOOLCHAIN=local" >> "$GITHUB_ENV"
+
+      - name: Prepare sing-box assets
+        run: |
+          bash .github/scripts/prepare-singbox-assets.sh \
+            "${SING_BOX_VERSION}" \
+            "${{ matrix.goos }}" \
+            "${{ matrix.goarch }}"
+
+      - name: Build core with sing-box subcore
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p dist
+          go build -v -tags "with_gvisor with_singbox" -trimpath \
+            -ldflags "-extldflags --static -X 'github.com/metacubex/mihomo/constant.Version=${RELEASE_VERSION}' -X 'github.com/metacubex/mihomo/constant.BuildTime=${BUILDTIME}' -w -s -buildid=" \
+            -o "dist/mihomo-singbox-${{ matrix.output }}${{ matrix.ext }}"
+
+      - name: Package
+        run: |
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            (cd dist && zip -9 "mihomo-singbox-${{ matrix.output }}-${RELEASE_VERSION}.zip" "mihomo-singbox-${{ matrix.output }}${{ matrix.ext }}")
+          else
+            gzip -c "dist/mihomo-singbox-${{ matrix.output }}" > "dist/mihomo-singbox-${{ matrix.output }}-${RELEASE_VERSION}.gz"
+          fi
+
+      - name: Archive artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: mihomo-singbox-${{ matrix.output }}
+          path: |
+            dist/*.gz
+            dist/*.zip
+
+  release:
+    needs: [meta, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd release
+          sha256sum * | sort -k 2 > checksums.txt
+          cat checksums.txt
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.meta.outputs.release_tag }}
+          name: mihomo ${{ needs.meta.outputs.release_version }}
+          target_commitish: ${{ github.sha }}
+          files: release/*
+          prerelease: ${{ inputs.prerelease }}
+          make_latest: ${{ !inputs.prerelease }}
+          overwrite_files: true
+          body: |
+            mihomo main version: `${{ needs.meta.outputs.mihomo_version }}`
+            sing-box version: `${{ needs.meta.outputs.sing_box_version }}`
+            build suffix: `${{ needs.meta.outputs.build_suffix }}`
+            commit: `${{ github.sha }}`
+
+            This release contains sing-box subcore builds for Linux amd64/arm64 and Windows amd64/arm64.

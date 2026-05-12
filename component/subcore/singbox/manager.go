@@ -1,0 +1,323 @@
+package singbox
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os/exec"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/metacubex/mihomo/log"
+)
+
+const (
+	stopTimeout        = 5 * time.Second
+	killTimeout        = 2 * time.Second
+	stableRunThreshold = 30 * time.Second
+	maxQuickFailures   = 5
+)
+
+var defaultManager = &manager{}
+
+type manager struct {
+	mux          sync.Mutex
+	current      *processState
+	desired      *Config
+	failureCount int
+}
+
+type processState struct {
+	cmd        *exec.Cmd
+	handle     *managedProcess
+	done       chan error
+	layout     *runtimeLayout
+	configHash string
+	runID      string
+	pid        int
+	startedAt  time.Time
+}
+
+func Apply(cfg *Config) error {
+	return defaultManager.Apply(cfg)
+}
+
+func Shutdown() {
+	defaultManager.Shutdown()
+}
+
+func Available() bool {
+	return embeddedAvailable()
+}
+
+func (m *manager) Apply(cfg *Config) error {
+	m.mux.Lock()
+	defer m.mux.Unlock()
+
+	cfg = cfg.Clone()
+	if cfg == nil {
+		m.desired = nil
+		m.failureCount = 0
+		m.stopCurrentLocked()
+		reapOrphan(preparePIDRuntimeLayout())
+		return nil
+	}
+
+	if m.current != nil && m.current.configHash == cfg.Hash {
+		m.desired = cfg
+		return nil
+	}
+
+	layout, err := prepareRuntimeLayout()
+	if err != nil {
+		return err
+	}
+	if m.current == nil {
+		reapOrphan(preparePIDRuntimeLayout())
+	}
+
+	if err := layout.Ensure(); err != nil {
+		return err
+	}
+	if err := layout.WriteConfig(cfg); err != nil {
+		return err
+	}
+	if err := checkConfig(layout); err != nil {
+		return err
+	}
+
+	if m.desired == nil || m.desired.Hash != cfg.Hash {
+		m.failureCount = 0
+	}
+	m.desired = cfg
+	m.stopCurrentLocked()
+
+	state, err := startProcess(layout, cfg.Hash)
+	if err != nil {
+		return err
+	}
+	m.current = state
+	log.Infoln("[sing-box] started, pid: %d", state.pid)
+	return nil
+}
+
+func (m *manager) Shutdown() {
+	m.mux.Lock()
+	defer m.mux.Unlock()
+	m.desired = nil
+	m.stopCurrentLocked()
+}
+
+func (m *manager) stopCurrentLocked() {
+	if m.current == nil {
+		return
+	}
+	state := m.current
+	m.current = nil
+	stopProcess(state)
+	removePIDFile(state.layout.PIDPath)
+}
+
+func checkConfig(layout *runtimeLayout) error {
+	cmd := exec.Command(layout.ExecutablePath, "check", "-c", layout.ConfigPath)
+	cmd.Dir = layout.AssetDir
+	cmd.Env = layout.CommandEnv("check")
+	prepareCheckCommand(cmd)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("sing-box config check failed: %w, %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func startProcess(layout *runtimeLayout, configHash string) (*processState, error) {
+	runID := newRunID()
+	cmd := exec.Command(layout.ExecutablePath, "run", "-c", layout.ConfigPath)
+	cmd.Dir = layout.AssetDir
+	cmd.Env = layout.CommandEnv(runID)
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, err
+	}
+
+	handle, err := prepareStartCommand(cmd)
+	if err != nil {
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		cleanupManagedProcess(handle)
+		return nil, err
+	}
+	if err := afterStartCommand(handle, cmd); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		cleanupManagedProcess(handle)
+		return nil, err
+	}
+
+	state := &processState{
+		cmd:        cmd,
+		handle:     handle,
+		done:       make(chan error, 1),
+		layout:     layout,
+		configHash: configHash,
+		runID:      runID,
+		pid:        cmd.Process.Pid,
+		startedAt:  time.Now(),
+	}
+
+	go forwardLogs(stdout, log.INFO)
+	go forwardLogs(stderr, log.WARNING)
+	go defaultManager.waitProcess(state)
+
+	if err := writePIDFile(layout, state.pid, configHash, runID); err != nil {
+		stopProcess(state)
+		return nil, err
+	}
+
+	return state, nil
+}
+
+func stopProcess(state *processState) {
+	_ = terminateCommand(state.cmd, state.handle)
+	select {
+	case <-state.done:
+	case <-time.After(stopTimeout):
+		_ = killCommand(state.cmd, state.handle)
+		select {
+		case <-state.done:
+		case <-time.After(killTimeout):
+		}
+	}
+	cleanupManagedProcess(state.handle)
+}
+
+func (m *manager) waitProcess(state *processState) {
+	err := state.cmd.Wait()
+	state.done <- err
+	close(state.done)
+	cleanupManagedProcess(state.handle)
+
+	m.mux.Lock()
+	defer m.mux.Unlock()
+
+	if m.current != state {
+		return
+	}
+	m.current = nil
+	removePIDFile(state.layout.PIDPath)
+
+	uptime := time.Since(state.startedAt)
+	if uptime > stableRunThreshold {
+		m.failureCount = 0
+	}
+	m.failureCount++
+	if m.failureCount > maxQuickFailures {
+		log.Errorln("[sing-box] exited too often, stop automatic restart: %v", err)
+		return
+	}
+
+	delay := restartDelay(m.failureCount)
+	log.Warnln("[sing-box] exited: %v, restart in %s", err, delay)
+	if m.desired != nil && m.desired.Hash == state.configHash {
+		cfg := m.desired.Clone()
+		go m.restartAfter(delay, cfg)
+	}
+}
+
+func (m *manager) restartAfter(delay time.Duration, cfg *Config) {
+	time.Sleep(delay)
+	if err := m.Apply(cfg); err != nil {
+		log.Errorln("[sing-box] restart failed: %s", err.Error())
+	}
+}
+
+func restartDelay(failures int) time.Duration {
+	if failures < 1 {
+		failures = 1
+	}
+	delay := time.Duration(1<<(failures-1)) * time.Second
+	if delay > time.Minute {
+		return time.Minute
+	}
+	return delay
+}
+
+func forwardLogs(reader io.Reader, fallbackLevel log.LogLevel) {
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 0, 4096), 1024*1024)
+	for scanner.Scan() {
+		forwardLogLine(scanner.Text(), fallbackLevel)
+	}
+	if err := scanner.Err(); err != nil {
+		log.Debugln("[sing-box] read log failed: %s", err.Error())
+	}
+}
+
+type structuredLog struct {
+	Level   string `json:"level"`
+	Message string `json:"message"`
+	Msg     string `json:"msg"`
+}
+
+func forwardLogLine(line string, fallbackLevel log.LogLevel) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return
+	}
+
+	level := fallbackLevel
+	message := line
+	if bytes.HasPrefix([]byte(line), []byte("{")) {
+		var item structuredLog
+		if err := json.Unmarshal([]byte(line), &item); err == nil {
+			if parsed, ok := parseLogLevel(item.Level); ok {
+				level = parsed
+			}
+			if item.Message != "" {
+				message = item.Message
+			} else if item.Msg != "" {
+				message = item.Msg
+			}
+		}
+	}
+
+	writeLog(level, "[sing-box] %s", message)
+}
+
+func parseLogLevel(level string) (log.LogLevel, bool) {
+	switch strings.ToLower(level) {
+	case "debug", "trace":
+		return log.DEBUG, true
+	case "info":
+		return log.INFO, true
+	case "warn", "warning":
+		return log.WARNING, true
+	case "error", "fatal", "panic":
+		return log.ERROR, true
+	default:
+		return log.INFO, false
+	}
+}
+
+func writeLog(level log.LogLevel, format string, args ...any) {
+	switch level {
+	case log.DEBUG:
+		log.Debugln(format, args...)
+	case log.WARNING:
+		log.Warnln(format, args...)
+	case log.ERROR:
+		log.Errorln(format, args...)
+	default:
+		log.Infoln(format, args...)
+	}
+}
