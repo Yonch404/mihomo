@@ -21,6 +21,7 @@ const (
 	subcoreName    = "sing-box"
 	configFileName = "config.json"
 	pidFileName    = "sing-box.pid"
+	ownerFileName  = "sing-box.owner"
 )
 
 type runtimeLayout struct {
@@ -28,6 +29,7 @@ type runtimeLayout struct {
 	AssetDir       string
 	ConfigPath     string
 	PIDPath        string
+	OwnerPath      string
 	ExecutablePath string
 	Assets         *assetSet
 }
@@ -35,12 +37,26 @@ type runtimeLayout struct {
 type pidRecord struct {
 	PID            int    `json:"pid"`
 	ParentPID      int    `json:"parent-pid"`
+	ParentExe      string `json:"parent-executable,omitempty"`
 	Executable     string `json:"executable"`
 	ConfigPath     string `json:"config"`
 	AssetHash      string `json:"asset-hash"`
 	ConfigHash     string `json:"config-hash"`
 	RunID          string `json:"run-id"`
+	OwnerID        string `json:"owner-id,omitempty"`
 	StartedUnixSec int64  `json:"started-unix-sec"`
+}
+
+type ownerRecord struct {
+	PID            int    `json:"pid"`
+	Executable     string `json:"executable,omitempty"`
+	OwnerID        string `json:"owner-id"`
+	StartedUnixSec int64  `json:"started-unix-sec"`
+}
+
+type ownerLock struct {
+	path   string
+	record ownerRecord
 }
 
 func prepareRuntimeLayout() (*runtimeLayout, error) {
@@ -63,6 +79,7 @@ func prepareRuntimeLayout() (*runtimeLayout, error) {
 		AssetDir:       assetDir,
 		ConfigPath:     filepath.Join(runDir, configFileName),
 		PIDPath:        filepath.Join(runDir, pidFileName),
+		OwnerPath:      filepath.Join(runDir, ownerFileName),
 		ExecutablePath: executablePath,
 		Assets:         assets,
 	}, nil
@@ -71,8 +88,9 @@ func prepareRuntimeLayout() (*runtimeLayout, error) {
 func preparePIDRuntimeLayout() *runtimeLayout {
 	runDir := filepath.Join(C.Path.HomeDir(), "run", subcoreName)
 	return &runtimeLayout{
-		RunDir:  runDir,
-		PIDPath: filepath.Join(runDir, pidFileName),
+		RunDir:    runDir,
+		PIDPath:   filepath.Join(runDir, pidFileName),
+		OwnerPath: filepath.Join(runDir, ownerFileName),
 	}
 }
 
@@ -138,15 +156,17 @@ func (l *runtimeLayout) CommandEnv(runID string) []string {
 	return env
 }
 
-func writePIDFile(layout *runtimeLayout, pid int, cfgHash string, runID string) error {
+func writePIDFile(layout *runtimeLayout, pid int, cfgHash string, runID string, ownerID string) error {
 	record := pidRecord{
 		PID:            pid,
 		ParentPID:      os.Getpid(),
+		ParentExe:      currentExecutablePath(),
 		Executable:     layout.ExecutablePath,
 		ConfigPath:     layout.ConfigPath,
 		AssetHash:      layout.Assets.Hash,
 		ConfigHash:     cfgHash,
 		RunID:          runID,
+		OwnerID:        ownerID,
 		StartedUnixSec: time.Now().Unix(),
 	}
 	data, err := json.Marshal(record)
@@ -160,33 +180,41 @@ func removePIDFile(path string) {
 	_ = os.Remove(path)
 }
 
-func reapOrphan(layout *runtimeLayout) {
+func reapOrphan(layout *runtimeLayout, failOnLiveOwner bool) error {
 	record, err := readPIDFile(layout.PIDPath)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			log.Warnln("[sing-box] read pid file failed: %s", err.Error())
 		}
-		return
+		return nil
+	}
+	if ownedByLiveOtherManager(record) {
+		message := fmt.Sprintf("sing-box is already managed by another mihomo process pid %d", record.ParentPID)
+		if failOnLiveOwner {
+			return errors.New(message)
+		}
+		log.Warnln("[sing-box] %s, skip orphan cleanup", message)
+		return nil
 	}
 	if record.PID <= 0 {
 		removePIDFile(layout.PIDPath)
-		return
+		return nil
 	}
 	if !processExists(record.PID) {
 		removePIDFile(layout.PIDPath)
-		return
+		return nil
 	}
 	if !isManagedExecutablePath(record.Executable) {
 		log.Warnln("[sing-box] stale pid file points outside managed directory, skip killing pid %d", record.PID)
 		removePIDFile(layout.PIDPath)
-		return
+		return nil
 	}
 
 	if runningPath, err := processPath(record.PID); err == nil {
 		if !samePath(runningPath, record.Executable) {
 			log.Warnln("[sing-box] stale pid file pid %d now belongs to another executable, skip cleanup", record.PID)
 			removePIDFile(layout.PIDPath)
-			return
+			return nil
 		}
 	}
 
@@ -197,6 +225,126 @@ func reapOrphan(layout *runtimeLayout) {
 		_ = waitProcessExit(record.PID, 2*time.Second)
 	}
 	removePIDFile(layout.PIDPath)
+	return nil
+}
+
+func acquireOwnerLock(layout *runtimeLayout) (*ownerLock, error) {
+	if err := os.MkdirAll(layout.RunDir, 0o700); err != nil {
+		return nil, err
+	}
+
+	record := ownerRecord{
+		PID:            os.Getpid(),
+		Executable:     currentExecutablePath(),
+		OwnerID:        newRunID(),
+		StartedUnixSec: time.Now().Unix(),
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		return nil, err
+	}
+
+	for attempt := 0; attempt < 10; attempt++ {
+		file, err := os.OpenFile(layout.OwnerPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			_, writeErr := file.Write(data)
+			closeErr := file.Close()
+			if writeErr != nil {
+				_ = os.Remove(layout.OwnerPath)
+				return nil, writeErr
+			}
+			if closeErr != nil {
+				_ = os.Remove(layout.OwnerPath)
+				return nil, closeErr
+			}
+			return &ownerLock{path: layout.OwnerPath, record: record}, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return nil, err
+		}
+
+		owner, err := readOwnerFile(layout.OwnerPath)
+		if err != nil {
+			if attempt < 4 {
+				time.Sleep(50 * time.Millisecond)
+				continue
+			}
+			log.Warnln("[sing-box] remove invalid owner lock: %s", err.Error())
+			if err := os.Remove(layout.OwnerPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return nil, fmt.Errorf("remove invalid sing-box owner lock: %w", err)
+			}
+			continue
+		}
+		if ownerRecordAlive(owner) {
+			return nil, fmt.Errorf("sing-box is already managed by another mihomo process pid %d", owner.PID)
+		}
+		if err := os.Remove(layout.OwnerPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+	}
+	return nil, errors.New("acquire sing-box owner lock failed")
+}
+
+func readOwnerFile(path string) (*ownerRecord, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	record := &ownerRecord{}
+	if err := json.Unmarshal(data, record); err != nil {
+		return nil, err
+	}
+	return record, nil
+}
+
+func (l *ownerLock) ID() string {
+	if l == nil {
+		return ""
+	}
+	return l.record.OwnerID
+}
+
+func (l *ownerLock) Release() {
+	if l == nil || l.path == "" {
+		return
+	}
+	record, err := readOwnerFile(l.path)
+	if err != nil {
+		return
+	}
+	if record.PID == l.record.PID && record.OwnerID == l.record.OwnerID {
+		_ = os.Remove(l.path)
+	}
+}
+
+func ownedByLiveOtherManager(record *pidRecord) bool {
+	if record == nil || record.ParentPID <= 0 || record.ParentPID == os.Getpid() {
+		return false
+	}
+	if !processExists(record.ParentPID) {
+		return false
+	}
+	if record.ParentExe != "" {
+		if runningPath, err := processPath(record.ParentPID); err == nil && !samePath(runningPath, record.ParentExe) {
+			return false
+		}
+	}
+	return true
+}
+
+func ownerRecordAlive(record *ownerRecord) bool {
+	if record == nil || record.PID <= 0 || record.PID == os.Getpid() {
+		return false
+	}
+	if !processExists(record.PID) {
+		return false
+	}
+	if record.Executable != "" {
+		if runningPath, err := processPath(record.PID); err == nil && !samePath(runningPath, record.Executable) {
+			return false
+		}
+	}
+	return true
 }
 
 func readPIDFile(path string) (*pidRecord, error) {
@@ -220,6 +368,56 @@ func waitProcessExit(pid int, timeout time.Duration) bool {
 		time.Sleep(100 * time.Millisecond)
 	}
 	return !processExists(pid)
+}
+
+func cleanupOldAssets(layout *runtimeLayout) {
+	if err := removeOldAssets(layout); err != nil {
+		log.Warnln("[sing-box] cleanup old assets failed: %s", err.Error())
+	}
+}
+
+func removeOldAssets(layout *runtimeLayout) error {
+	if layout == nil || layout.AssetDir == "" {
+		return nil
+	}
+	assetRoot := filepath.Dir(layout.AssetDir)
+	entries, err := os.ReadDir(assetRoot)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	activeAssetDir := activeAssetDirFromPID(layout.PIDPath)
+	prefix := runtime.GOOS + "-" + runtime.GOARCH + "-"
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), prefix) {
+			continue
+		}
+		if !filepath.IsLocal(entry.Name()) {
+			continue
+		}
+		target := filepath.Join(assetRoot, entry.Name())
+		if err := ensureSubpath(assetRoot, target); err != nil {
+			return err
+		}
+		if samePath(target, layout.AssetDir) || (activeAssetDir != "" && samePath(target, activeAssetDir)) {
+			continue
+		}
+		if err := os.RemoveAll(target); err != nil {
+			return fmt.Errorf("remove %s: %w", target, err)
+		}
+	}
+	return nil
+}
+
+func activeAssetDirFromPID(pidPath string) string {
+	record, err := readPIDFile(pidPath)
+	if err != nil || record.PID <= 0 || record.Executable == "" || !processExists(record.PID) {
+		return ""
+	}
+	return cleanComparablePath(filepath.Dir(record.Executable))
 }
 
 func ensureSubpath(root, target string) error {
@@ -276,6 +474,14 @@ func isManagedExecutablePath(path string) bool {
 	root := filepath.Join(C.Path.HomeDir(), "subcores", subcoreName)
 	rel, err := filepath.Rel(root, path)
 	return err == nil && filepath.IsLocal(rel)
+}
+
+func currentExecutablePath() string {
+	path, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	return cleanComparablePath(path)
 }
 
 func samePath(left, right string) bool {

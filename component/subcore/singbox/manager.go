@@ -27,6 +27,7 @@ type manager struct {
 	mux          sync.Mutex
 	current      *processState
 	desired      *Config
+	owner        *ownerLock
 	failureCount int
 }
 
@@ -34,6 +35,8 @@ type processState struct {
 	cmd        *exec.Cmd
 	handle     *managedProcess
 	done       chan error
+	stdout     io.Reader
+	stderr     io.Reader
 	layout     *runtimeLayout
 	configHash string
 	runID      string
@@ -53,7 +56,7 @@ func Available() bool {
 	return embeddedAvailable()
 }
 
-func (m *manager) Apply(cfg *Config) error {
+func (m *manager) Apply(cfg *Config) (retErr error) {
 	m.mux.Lock()
 	defer m.mux.Unlock()
 
@@ -62,7 +65,10 @@ func (m *manager) Apply(cfg *Config) error {
 		m.desired = nil
 		m.failureCount = 0
 		m.stopCurrentLocked()
-		reapOrphan(preparePIDRuntimeLayout())
+		if err := reapOrphan(preparePIDRuntimeLayout(), false); err != nil {
+			log.Warnln("[sing-box] cleanup orphan failed: %s", err.Error())
+		}
+		m.releaseOwnerLocked()
 		return nil
 	}
 
@@ -75,8 +81,19 @@ func (m *manager) Apply(cfg *Config) error {
 	if err != nil {
 		return err
 	}
+	if err := m.ensureOwnerLocked(layout); err != nil {
+		return err
+	}
+	defer func() {
+		if retErr != nil && m.current == nil {
+			m.releaseOwnerLocked()
+		}
+	}()
+
 	if m.current == nil {
-		reapOrphan(preparePIDRuntimeLayout())
+		if err := reapOrphan(layout, true); err != nil {
+			return err
+		}
 	}
 
 	if err := layout.Ensure(); err != nil {
@@ -100,6 +117,13 @@ func (m *manager) Apply(cfg *Config) error {
 		return err
 	}
 	m.current = state
+	if err := writePIDFile(layout, state.pid, cfg.Hash, state.runID, m.owner.ID()); err != nil {
+		m.current = nil
+		stopUnmonitoredProcess(state)
+		return err
+	}
+	m.watchProcess(state)
+	cleanupOldAssets(layout)
 	log.Infoln("[sing-box] started, pid: %d", state.pid)
 	return nil
 }
@@ -109,6 +133,7 @@ func (m *manager) Shutdown() {
 	defer m.mux.Unlock()
 	m.desired = nil
 	m.stopCurrentLocked()
+	m.releaseOwnerLocked()
 }
 
 func (m *manager) stopCurrentLocked() {
@@ -119,6 +144,26 @@ func (m *manager) stopCurrentLocked() {
 	m.current = nil
 	stopProcess(state)
 	removePIDFile(state.layout.PIDPath)
+}
+
+func (m *manager) ensureOwnerLocked(layout *runtimeLayout) error {
+	if m.owner != nil {
+		return nil
+	}
+	owner, err := acquireOwnerLock(layout)
+	if err != nil {
+		return err
+	}
+	m.owner = owner
+	return nil
+}
+
+func (m *manager) releaseOwnerLocked() {
+	if m.owner == nil {
+		return
+	}
+	m.owner.Release()
+	m.owner = nil
 }
 
 func checkConfig(layout *runtimeLayout) error {
@@ -173,18 +218,17 @@ func startProcess(layout *runtimeLayout, configHash string) (*processState, erro
 		runID:      runID,
 		pid:        cmd.Process.Pid,
 		startedAt:  time.Now(),
-	}
-
-	go forwardLogs(stdout, log.INFO)
-	go forwardLogs(stderr, log.WARNING)
-	go defaultManager.waitProcess(state)
-
-	if err := writePIDFile(layout, state.pid, configHash, runID); err != nil {
-		stopProcess(state)
-		return nil, err
+		stdout:     stdout,
+		stderr:     stderr,
 	}
 
 	return state, nil
+}
+
+func (m *manager) watchProcess(state *processState) {
+	go forwardLogs(state.stdout, log.INFO)
+	go forwardLogs(state.stderr, log.WARNING)
+	go m.waitProcess(state)
 }
 
 func stopProcess(state *processState) {
@@ -195,6 +239,25 @@ func stopProcess(state *processState) {
 		_ = killCommand(state.cmd, state.handle)
 		select {
 		case <-state.done:
+		case <-time.After(killTimeout):
+		}
+	}
+	cleanupManagedProcess(state.handle)
+}
+
+func stopUnmonitoredProcess(state *processState) {
+	wait := make(chan error, 1)
+	go func() {
+		wait <- state.cmd.Wait()
+	}()
+
+	_ = terminateCommand(state.cmd, state.handle)
+	select {
+	case <-wait:
+	case <-time.After(stopTimeout):
+		_ = killCommand(state.cmd, state.handle)
+		select {
+		case <-wait:
 		case <-time.After(killTimeout):
 		}
 	}
