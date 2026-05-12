@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/metacubex/mihomo/log"
 	"github.com/stretchr/testify/require"
 )
 
@@ -115,6 +116,27 @@ func TestRemoveOldAssetsKeepsCurrentAndOtherPlatforms(t *testing.T) {
 	require.DirExists(t, current)
 	require.NoDirExists(t, old)
 	require.DirExists(t, foreign)
+}
+
+func TestParseForwardedLogLineStripsANSIAndDetectsTextLevel(t *testing.T) {
+	line := "\x1b[36mINFO\x1b[0m[0076] [\x1b[38;5;224m3696673744\x1b[0m 0ms] inbound/socks[socks-in-a02]: inbound connection to api.github.com:443"
+
+	level, message, ok := parseForwardedLogLine(line, log.WARNING)
+
+	require.True(t, ok)
+	require.Equal(t, log.INFO, level)
+	require.NotContains(t, message, "\x1b")
+	require.Equal(t, "INFO[0076] [3696673744 0ms] inbound/socks[socks-in-a02]: inbound connection to api.github.com:443", message)
+}
+
+func TestParseForwardedLogLineDetectsStructuredLevelAfterANSIStrip(t *testing.T) {
+	line := "\x1b[32m{\"level\":\"error\",\"message\":\"dial failed\"}\x1b[0m"
+
+	level, message, ok := parseForwardedLogLine(line, log.WARNING)
+
+	require.True(t, ok)
+	require.Equal(t, log.ERROR, level)
+	require.Equal(t, "dial failed", message)
 }
 
 func newTestRuntimeLayout(t *testing.T) *runtimeLayout {

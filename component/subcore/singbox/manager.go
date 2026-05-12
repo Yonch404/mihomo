@@ -2,7 +2,6 @@ package singbox
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -333,14 +332,23 @@ type structuredLog struct {
 }
 
 func forwardLogLine(line string, fallbackLevel log.LogLevel) {
-	line = strings.TrimSpace(line)
-	if line == "" {
+	level, message, ok := parseForwardedLogLine(line, fallbackLevel)
+	if !ok {
 		return
+	}
+
+	writeLog(level, "[sing-box] %s", message)
+}
+
+func parseForwardedLogLine(line string, fallbackLevel log.LogLevel) (log.LogLevel, string, bool) {
+	line = strings.TrimSpace(stripANSIEscapeSequences(line))
+	if line == "" {
+		return fallbackLevel, "", false
 	}
 
 	level := fallbackLevel
 	message := line
-	if bytes.HasPrefix([]byte(line), []byte("{")) {
+	if strings.HasPrefix(line, "{") {
 		var item structuredLog
 		if err := json.Unmarshal([]byte(line), &item); err == nil {
 			if parsed, ok := parseLogLevel(item.Level); ok {
@@ -352,13 +360,76 @@ func forwardLogLine(line string, fallbackLevel log.LogLevel) {
 				message = item.Msg
 			}
 		}
+	} else if parsed, ok := parseTextLogLevel(line); ok {
+		level = parsed
 	}
 
-	writeLog(level, "[sing-box] %s", message)
+	return level, message, true
+}
+
+func stripANSIEscapeSequences(line string) string {
+	var builder strings.Builder
+	builder.Grow(len(line))
+
+	for i := 0; i < len(line); i++ {
+		character := line[i]
+		if character == 0x1b {
+			if i+1 >= len(line) {
+				continue
+			}
+			switch line[i+1] {
+			case '[':
+				i += 2
+				for i < len(line) {
+					if line[i] >= 0x40 && line[i] <= 0x7e {
+						break
+					}
+					i++
+				}
+			case ']':
+				i += 2
+				for i < len(line) {
+					if line[i] == 0x07 {
+						break
+					}
+					if line[i] == 0x1b && i+1 < len(line) && line[i+1] == '\\' {
+						i++
+						break
+					}
+					i++
+				}
+			default:
+				i++
+			}
+			continue
+		}
+		if (character < 0x20 && character != '\t') || character == 0x7f {
+			continue
+		}
+		builder.WriteByte(character)
+	}
+
+	return builder.String()
+}
+
+func parseTextLogLevel(line string) (log.LogLevel, bool) {
+	line = strings.TrimLeft(line, " \t")
+	end := 0
+	for end < len(line) {
+		character := line[end]
+		if (character < 'A' || character > 'Z') && (character < 'a' || character > 'z') {
+			break
+		}
+		end++
+	}
+	if end == 0 {
+		return log.INFO, false
+	}
+	return parseLogLevel(line[:end])
 }
 
 func parseLogLevel(level string) (log.LogLevel, bool) {
-	switch strings.ToLower(level) {
+	switch strings.ToLower(strings.TrimSpace(level)) {
 	case "debug", "trace":
 		return log.DEBUG, true
 	case "info":
