@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       mihomo_version:
-        description: "Mihomo version. Leave empty to use current tag or constant.Version"
-        required: false
+        description: "Mihomo version"
+        required: true
       build_suffix:
-        description: "Optional build suffix. Leave empty to publish without a suffix"
-        required: false
+        description: "Build suffix for this manual build, for example b001"
+        required: true
       prerelease:
         description: "Mark the GitHub Release as prerelease"
         required: true
@@ -29,49 +29,44 @@ jobs:
       release_version: ${{ steps.version.outputs.release_version }}
       release_tag: ${{ steps.version.outputs.release_tag }}
     steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-          fetch-tags: true
-
       - name: Resolve release version
         id: version
         shell: bash
+        env:
+          INPUT_MIHOMO_VERSION: ${{ inputs.mihomo_version }}
+          INPUT_BUILD_SUFFIX: ${{ inputs.build_suffix }}
         run: |
           set -euo pipefail
 
           sing_box_version="${SING_BOX_VERSION#v}"
-
-          mihomo_version="${{ inputs.mihomo_version }}"
-          if [ -z "${mihomo_version}" ]; then
-            if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-              mihomo_version="${GITHUB_REF_NAME}"
-            else
-              mihomo_version="$(sed -n 's/.*Version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' constant/version.go | head -n 1)"
-            fi
-          fi
-          mihomo_version="${mihomo_version#v}"
-
-          build_suffix="${{ inputs.build_suffix }}"
+          mihomo_version="${INPUT_MIHOMO_VERSION}"
+          build_suffix="${INPUT_BUILD_SUFFIX}"
 
           sanitize() {
             printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^0-9a-z._-]+/-/g; s/^-+//; s/-+$//'
           }
 
           mihomo_version="$(sanitize "${mihomo_version}")"
+          mihomo_version="${mihomo_version#v}"
           sing_box_version="$(sanitize "${sing_box_version}")"
           build_suffix="$(sanitize "${build_suffix}")"
 
-          release_version="v${mihomo_version}-sb.${sing_box_version}"
-          if [ -n "${build_suffix}" ]; then
-            release_version="${release_version}-${build_suffix}"
+          if [ -z "${mihomo_version}" ]; then
+            echo "mihomo_version is required and cannot be empty after sanitization" >&2
+            exit 1
           fi
-          release_tag="${release_version}"
+          if [ -z "${sing_box_version}" ]; then
+            echo "SING_BOX_VERSION is required and cannot be empty after sanitization" >&2
+            exit 1
+          fi
           if [ -z "${build_suffix}" ]; then
-            display_build_suffix="none"
-          else
-            display_build_suffix="${build_suffix}"
+            echo "build_suffix is required and cannot be empty after sanitization" >&2
+            exit 1
           fi
+
+          release_version="v${mihomo_version}-sb.${sing_box_version}-${build_suffix}"
+          release_tag="${release_version}"
+          display_build_suffix="${build_suffix}"
 
           echo "mihomo_version=${mihomo_version}" >> "$GITHUB_OUTPUT"
           echo "sing_box_version=${sing_box_version}" >> "$GITHUB_OUTPUT"
