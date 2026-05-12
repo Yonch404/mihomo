@@ -7,7 +7,7 @@ on:
         description: "Mihomo version. Leave empty to use current tag or constant.Version"
         required: false
       build_suffix:
-        description: "Build suffix. Leave empty to use r<run_number>a<attempt>"
+        description: "Optional build suffix. Leave empty to publish without a suffix"
         required: false
       prerelease:
         description: "Mark the GitHub Release as prerelease"
@@ -25,6 +25,7 @@ jobs:
       mihomo_version: ${{ steps.version.outputs.mihomo_version }}
       sing_box_version: ${{ steps.version.outputs.sing_box_version }}
       build_suffix: ${{ steps.version.outputs.build_suffix }}
+      display_build_suffix: ${{ steps.version.outputs.display_build_suffix }}
       release_version: ${{ steps.version.outputs.release_version }}
       release_tag: ${{ steps.version.outputs.release_tag }}
     steps:
@@ -52,9 +53,6 @@ jobs:
           mihomo_version="${mihomo_version#v}"
 
           build_suffix="${{ inputs.build_suffix }}"
-          if [ -z "${build_suffix}" ]; then
-            build_suffix="r${GITHUB_RUN_NUMBER}a${GITHUB_RUN_ATTEMPT}"
-          fi
 
           sanitize() {
             printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^0-9a-z._-]+/-/g; s/^-+//; s/-+$//'
@@ -64,12 +62,21 @@ jobs:
           sing_box_version="$(sanitize "${sing_box_version}")"
           build_suffix="$(sanitize "${build_suffix}")"
 
-          release_version="v${mihomo_version}-sb.${sing_box_version}-${build_suffix}"
+          release_version="v${mihomo_version}-sb.${sing_box_version}"
+          if [ -n "${build_suffix}" ]; then
+            release_version="${release_version}-${build_suffix}"
+          fi
           release_tag="${release_version}"
+          if [ -z "${build_suffix}" ]; then
+            display_build_suffix="none"
+          else
+            display_build_suffix="${build_suffix}"
+          fi
 
           echo "mihomo_version=${mihomo_version}" >> "$GITHUB_OUTPUT"
           echo "sing_box_version=${sing_box_version}" >> "$GITHUB_OUTPUT"
           echo "build_suffix=${build_suffix}" >> "$GITHUB_OUTPUT"
+          echo "display_build_suffix=${display_build_suffix}" >> "$GITHUB_OUTPUT"
           echo "release_version=${release_version}" >> "$GITHUB_OUTPUT"
           echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
 
@@ -189,7 +196,7 @@ jobs:
           body: |
             mihomo main version: `${{ needs.meta.outputs.mihomo_version }}`
             sing-box version: `${{ needs.meta.outputs.sing_box_version }}`
-            build suffix: `${{ needs.meta.outputs.build_suffix }}`
+            build suffix: `${{ needs.meta.outputs.display_build_suffix }}`
             commit: `${{ github.sha }}`
 
             This release contains sing-box subcore builds for Linux amd64 v1/v2/v3, Linux arm64, Windows amd64 v1/v2/v3, and Windows arm64.
