@@ -126,7 +126,17 @@ func TestParseForwardedLogLineStripsANSIAndDetectsTextLevel(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, log.INFO, level)
 	require.NotContains(t, message, "\x1b")
-	require.Equal(t, "INFO[0076] [3696673744 0ms] inbound/socks[socks-in-a02]: inbound connection to api.github.com:443", message)
+	require.Equal(t, "[3696673744 0ms] inbound/socks[socks-in-a02]: inbound connection to api.github.com:443", message)
+}
+
+func TestParseForwardedLogLineRemovesSingBoxTextHeader(t *testing.T) {
+	line := "WARN[0001] dns: lookup example.com failed"
+
+	level, message, ok := parseForwardedLogLine(line, log.INFO)
+
+	require.True(t, ok)
+	require.Equal(t, log.WARNING, level)
+	require.Equal(t, "dns: lookup example.com failed", message)
 }
 
 func TestParseForwardedLogLineDetectsStructuredLevelAfterANSIStrip(t *testing.T) {

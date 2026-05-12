@@ -360,8 +360,9 @@ func parseForwardedLogLine(line string, fallbackLevel log.LogLevel) (log.LogLeve
 				message = item.Msg
 			}
 		}
-	} else if parsed, ok := parseTextLogLevel(line); ok {
+	} else if parsed, parsedMessage, ok := parseTextLogLine(line); ok {
 		level = parsed
+		message = parsedMessage
 	}
 
 	return level, message, true
@@ -412,7 +413,7 @@ func stripANSIEscapeSequences(line string) string {
 	return builder.String()
 }
 
-func parseTextLogLevel(line string) (log.LogLevel, bool) {
+func parseTextLogLine(line string) (log.LogLevel, string, bool) {
 	line = strings.TrimLeft(line, " \t")
 	end := 0
 	for end < len(line) {
@@ -423,9 +424,26 @@ func parseTextLogLevel(line string) (log.LogLevel, bool) {
 		end++
 	}
 	if end == 0 {
-		return log.INFO, false
+		return log.INFO, "", false
 	}
-	return parseLogLevel(line[:end])
+	level, ok := parseLogLevel(line[:end])
+	if !ok {
+		return log.INFO, "", false
+	}
+
+	message := strings.TrimLeft(line[end:], " \t")
+	if strings.HasPrefix(message, "[") {
+		if closeBracket := strings.IndexByte(message, ']'); closeBracket >= 0 {
+			message = strings.TrimLeft(message[closeBracket+1:], " \t")
+		}
+	}
+	message = strings.TrimPrefix(message, ":")
+	message = strings.TrimLeft(message, " \t")
+	if message == "" {
+		message = strings.TrimSpace(line)
+	}
+
+	return level, message, true
 }
 
 func parseLogLevel(level string) (log.LogLevel, bool) {
