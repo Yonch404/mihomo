@@ -96,8 +96,17 @@ jobs:
 
       - name: Fix issue77930 for Golang1.26
         run: |
+          set -euo pipefail
+          patch_file="$GITHUB_WORKSPACE/.github/patch/issue77930.patch"
           cd "$(go env GOROOT)"
-          patch --verbose -p 1 < "$GITHUB_WORKSPACE/.github/patch/issue77930.patch"
+          if patch --batch --forward --dry-run -p 1 < "$patch_file"; then
+            patch --verbose --batch --forward -p 1 < "$patch_file"
+          elif patch --batch --reverse --dry-run -p 1 < "$patch_file"; then
+            echo "issue77930 patch already applied; skip"
+          else
+            echo "issue77930 patch cannot be applied cleanly" >&2
+            exit 1
+          fi
 
       - name: Set variables
         run: |
