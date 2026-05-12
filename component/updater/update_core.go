@@ -24,21 +24,24 @@ import (
 )
 
 const (
-	baseReleaseURL    = "https://github.com/MetaCubeX/mihomo/releases/latest/download/"
-	versionReleaseURL = "https://github.com/MetaCubeX/mihomo/releases/latest/download/version.txt"
-
-	baseAlphaURL    = "https://github.com/MetaCubeX/mihomo/releases/download/Prerelease-Alpha/"
-	versionAlphaURL = "https://github.com/MetaCubeX/mihomo/releases/download/Prerelease-Alpha/version.txt"
-
 	// MaxPackageFileSize is a maximum package file length in bytes. The largest
-	// package whose size is limited by this constant currently has the size of
-	// approximately 32 MiB.
-	MaxPackageFileSize = 32 * 1024 * 1024
+	// sing-box subcore package is currently around 37 MiB, so leave enough room
+	// for libcronet and future growth.
+	MaxPackageFileSize = 128 * 1024 * 1024
 )
 
 const (
 	ReleaseChannel = "release"
 	AlphaChannel   = "alpha"
+)
+
+var (
+	CorePackagePrefix     = "mihomo-singbox"
+	CoreReleaseBaseURL    = "https://github.com/Yonch404/mihomo/releases/latest/download/"
+	CoreReleaseVersionURL = "https://github.com/Yonch404/mihomo/releases/latest/download/version.txt"
+
+	CoreAlphaBaseURL    = "https://github.com/Yonch404/mihomo/releases/download/Prerelease-Alpha/"
+	CoreAlphaVersionURL = "https://github.com/Yonch404/mihomo/releases/download/Prerelease-Alpha/version.txt"
 )
 
 // CoreUpdater is the mihomo updater.
@@ -50,30 +53,34 @@ type CoreUpdater struct {
 var DefaultCoreUpdater = CoreUpdater{}
 
 func (u *CoreUpdater) CoreBaseName() string {
+	return u.coreBaseName(CorePackagePrefix)
+}
+
+func (u *CoreUpdater) coreBaseName(prefix string) string {
 	switch runtime.GOARCH {
 	case "arm":
 		// mihomo-linux-armv5
-		return fmt.Sprintf("mihomo-%s-%sv%s", runtime.GOOS, runtime.GOARCH, features.GOARM)
+		return fmt.Sprintf("%s-%s-%sv%s", prefix, runtime.GOOS, runtime.GOARCH, features.GOARM)
 	case "arm64":
 		if runtime.GOOS == "android" {
 			// mihomo-android-arm64-v8
-			return fmt.Sprintf("mihomo-%s-%s-v8", runtime.GOOS, runtime.GOARCH)
+			return fmt.Sprintf("%s-%s-%s-v8", prefix, runtime.GOOS, runtime.GOARCH)
 		} else {
 			// mihomo-linux-arm64
-			return fmt.Sprintf("mihomo-%s-%s", runtime.GOOS, runtime.GOARCH)
+			return fmt.Sprintf("%s-%s-%s", prefix, runtime.GOOS, runtime.GOARCH)
 		}
 	case "mips", "mipsle":
 		// mihomo-linux-mips-hardfloat
-		return fmt.Sprintf("mihomo-%s-%s-%s", runtime.GOOS, runtime.GOARCH, features.GOMIPS)
+		return fmt.Sprintf("%s-%s-%s-%s", prefix, runtime.GOOS, runtime.GOARCH, features.GOMIPS)
 	case "amd64":
 		// mihomo-linux-amd64-v1
-		return fmt.Sprintf("mihomo-%s-%s-%s", runtime.GOOS, runtime.GOARCH, features.GOAMD64)
+		return fmt.Sprintf("%s-%s-%s-%s", prefix, runtime.GOOS, runtime.GOARCH, features.GOAMD64)
 	default:
 		// mihomo-linux-386
 		// mihomo-linux-mips64
 		// mihomo-linux-riscv64
 		// mihomo-linux-s390x
-		return fmt.Sprintf("mihomo-%s-%s", runtime.GOOS, runtime.GOARCH)
+		return fmt.Sprintf("%s-%s-%s", prefix, runtime.GOOS, runtime.GOARCH)
 	}
 }
 
@@ -86,18 +93,18 @@ func (u *CoreUpdater) Update(currentExePath string, channel string, force bool) 
 		return fmt.Errorf("check currentExePath %q: %w", currentExePath, err)
 	}
 
-	baseURL := baseAlphaURL
-	versionURL := versionAlphaURL
+	baseURL := CoreAlphaBaseURL
+	versionURL := CoreAlphaVersionURL
 	switch strings.ToLower(channel) {
 	case ReleaseChannel:
-		baseURL = baseReleaseURL
-		versionURL = versionReleaseURL
+		baseURL = CoreReleaseBaseURL
+		versionURL = CoreReleaseVersionURL
 	case AlphaChannel:
 		break
 	default: // auto
 		if !strings.HasPrefix(C.Version, "alpha") {
-			baseURL = baseReleaseURL
-			versionURL = versionReleaseURL
+			baseURL = CoreReleaseBaseURL
+			versionURL = CoreReleaseVersionURL
 		}
 	}
 
@@ -128,7 +135,7 @@ func (u *CoreUpdater) Update(currentExePath string, channel string, force bool) 
 	} else {
 		packageName = packageName + ".gz"
 	}
-	packageURL := baseURL + packageName
+	packageURL := strings.TrimRight(baseURL, "/") + "/" + packageName
 	log.Infoln("updater: updating using url: %s", packageURL)
 
 	workDir := filepath.Dir(currentExePath)
@@ -152,7 +159,7 @@ func (u *CoreUpdater) Update(currentExePath string, channel string, force bool) 
 		return fmt.Errorf("downloading: %w", err)
 	}
 
-	err = u.unpack(updateDir, packagePath, info.Mode())
+	err = u.unpack(packagePath, updateExePath, info.Mode())
 	if err != nil {
 		return fmt.Errorf("unpacking: %w", err)
 	}
@@ -188,7 +195,7 @@ func (u *CoreUpdater) getLatestVersion(versionURL string) (version string, err e
 	if err != nil {
 		return "", err
 	}
-	content := strings.TrimRight(string(body), "\n")
+	content := strings.TrimSpace(string(body))
 	return content, nil
 }
 
@@ -246,16 +253,16 @@ func (u *CoreUpdater) download(updateDir, packagePath, packageURL string) (err e
 }
 
 // unpack extracts the files from the downloaded archive.
-func (u *CoreUpdater) unpack(updateDir, packagePath string, fileMode os.FileMode) error {
+func (u *CoreUpdater) unpack(packagePath, outputPath string, fileMode os.FileMode) error {
 	log.Infoln("updater: unpacking package")
 	if strings.HasSuffix(packagePath, ".zip") {
-		_, err := u.zipFileUnpack(packagePath, updateDir, fileMode)
+		_, err := u.zipFileUnpack(packagePath, outputPath, fileMode)
 		if err != nil {
 			return fmt.Errorf(".zip unpack failed: %w", err)
 		}
 
 	} else if strings.HasSuffix(packagePath, ".gz") {
-		_, err := u.gzFileUnpack(packagePath, updateDir, fileMode)
+		_, err := u.gzFileUnpack(packagePath, outputPath, fileMode)
 		if err != nil {
 			return fmt.Errorf(".gz unpack failed: %w", err)
 		}
@@ -292,11 +299,8 @@ func (u *CoreUpdater) clean(updateDir string) {
 	_ = os.RemoveAll(updateDir)
 }
 
-// Unpack a single .gz file to the specified directory
-// Existing files are overwritten
-// All files are created inside outDir, subdirectories are not created
-// Return the output file name
-func (u *CoreUpdater) gzFileUnpack(gzfile, outDir string, fileMode os.FileMode) (outputName string, err error) {
+// Unpack a single .gz file to the specified path.
+func (u *CoreUpdater) gzFileUnpack(gzfile, outputPath string, fileMode os.FileMode) (outputName string, err error) {
 	f, err := os.Open(gzfile)
 	if err != nil {
 		return "", fmt.Errorf("os.Open(): %w", err)
@@ -320,15 +324,8 @@ func (u *CoreUpdater) gzFileUnpack(gzfile, outDir string, fileMode os.FileMode) 
 			err = closeErr
 		}
 	}()
-	// Get the original file name from the .gz file header
-	originalName := gzReader.Header.Name
-	if originalName == "" {
-		// Fallback: remove the .gz extension from the input file name if the header doesn't provide the original name
-		originalName = filepath.Base(gzfile)
-		originalName = strings.TrimSuffix(originalName, ".gz")
-	}
 
-	outputName = filepath.Join(outDir, originalName)
+	outputName = outputPath
 
 	// Create the output file
 	wc, err := os.OpenFile(outputName, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, fileMode)
@@ -352,11 +349,8 @@ func (u *CoreUpdater) gzFileUnpack(gzfile, outDir string, fileMode os.FileMode) 
 	return outputName, nil
 }
 
-// Unpack a single file from .zip file to the specified directory
-// Existing files are overwritten
-// All files are created inside 'outDir', subdirectories are not created
-// Return the output file name
-func (u *CoreUpdater) zipFileUnpack(zipfile, outDir string, fileMode os.FileMode) (outputName string, err error) {
+// Unpack a single file from .zip file to the specified path.
+func (u *CoreUpdater) zipFileUnpack(zipfile, outputPath string, fileMode os.FileMode) (outputName string, err error) {
 	zrc, err := zip.OpenReader(zipfile)
 	if err != nil {
 		return "", fmt.Errorf("zip.OpenReader(): %w", err)
@@ -368,12 +362,17 @@ func (u *CoreUpdater) zipFileUnpack(zipfile, outDir string, fileMode os.FileMode
 			err = closeErr
 		}
 	}()
-	if len(zrc.File) == 0 {
+	var zf *zip.File
+	for _, file := range zrc.File {
+		if !file.FileInfo().IsDir() {
+			zf = file
+			break
+		}
+	}
+	if zf == nil {
 		return "", fmt.Errorf("no files in the zip archive")
 	}
 
-	// Assuming the first file in the zip archive is the target file
-	zf := zrc.File[0]
 	var rc io.ReadCloser
 	rc, err = zf.Open()
 	if err != nil {
@@ -386,13 +385,7 @@ func (u *CoreUpdater) zipFileUnpack(zipfile, outDir string, fileMode os.FileMode
 			err = closeErr
 		}
 	}()
-	fi := zf.FileInfo()
-	name := fi.Name()
-	outputName = filepath.Join(outDir, name)
-
-	if fi.IsDir() {
-		return "", fmt.Errorf("the target file is a directory")
-	}
+	outputName = outputPath
 
 	var wc io.WriteCloser
 	wc, err = os.OpenFile(outputName, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, fileMode)

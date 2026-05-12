@@ -180,7 +180,8 @@ jobs:
       - name: Generate checksums
         run: |
           cd release
-          sha256sum * | sort -k 2 > checksums.txt
+          printf '%s\n' "${{ needs.meta.outputs.release_version }}" > version.txt
+          find . -maxdepth 1 -type f ! -name "checksums.*" ! -name "version.txt" -printf '%P\0' | sort -z | xargs -0 -r sha256sum > checksums.txt
           cat checksums.txt
 
       - name: Publish GitHub Release
