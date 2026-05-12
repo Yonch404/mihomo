@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/metacubex/mihomo/log"
@@ -116,6 +117,37 @@ func TestRemoveOldAssetsKeepsCurrentAndOtherPlatforms(t *testing.T) {
 	require.DirExists(t, current)
 	require.NoDirExists(t, old)
 	require.DirExists(t, foreign)
+}
+
+func TestRuntimeLayoutEnsureCopiesAssetsFromFS(t *testing.T) {
+	assetDir := runtime.GOOS + "_" + runtime.GOARCH
+	assetFS := fstest.MapFS{
+		"assets/" + assetDir + "/" + executableName(): {
+			Data: []byte("sing-box binary"),
+		},
+		"assets/" + assetDir + "/libcronet.test": {
+			Data: []byte("libcronet binary"),
+		},
+	}
+	files, err := walkAssetFS(assetFS, "assets")
+	require.NoError(t, err)
+	assets, err := selectPlatformAssets(assetFS, files)
+	require.NoError(t, err)
+	require.NotEmpty(t, assets.Hash)
+
+	root := t.TempDir()
+	layout := &runtimeLayout{
+		RunDir:   filepath.Join(root, "run", subcoreName),
+		AssetDir: filepath.Join(root, "subcores", subcoreName, runtime.GOOS+"-"+runtime.GOARCH+"-"+shortHash(assets.Hash)),
+		Assets:   assets,
+	}
+
+	require.NoError(t, layout.Ensure())
+	require.FileExists(t, filepath.Join(layout.AssetDir, executableName()))
+
+	data, err := os.ReadFile(filepath.Join(layout.AssetDir, "libcronet.test"))
+	require.NoError(t, err)
+	require.Equal(t, "libcronet binary", string(data))
 }
 
 func TestParseForwardedLogLineStripsANSIAndDetectsTextLevel(t *testing.T) {

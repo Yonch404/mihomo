@@ -2,6 +2,8 @@
 
 package singbox
 
-func bundledAssetFiles() ([]assetFile, error) {
-	return nil, nil
+import "io/fs"
+
+func bundledAssetFiles() (fs.FS, []assetFile, error) {
+	return nil, nil, nil
 }

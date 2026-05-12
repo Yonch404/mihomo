@@ -16,6 +16,7 @@ import "embed"
 //go:embed assets
 var embeddedAssetFS embed.FS
 
-func bundledAssetFiles() ([]assetFile, error) {
-	return walkAssetFS(embeddedAssetFS, "assets")
+func bundledAssetFiles() (embed.FS, []assetFile, error) {
+	files, err := walkAssetFS(embeddedAssetFS, "assets")
+	return embeddedAssetFS, files, err
 }

@@ -1,12 +1,14 @@
 package singbox
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -118,11 +120,15 @@ func (l *runtimeLayout) Ensure() error {
 		if filepath.Base(target) == executableName() {
 			mode = 0o755
 		}
-		if sameFileContent(target, file.Data) {
+		sameContent, err := l.sameAssetFileContent(target, file)
+		if err != nil {
+			return err
+		}
+		if sameContent {
 			_ = os.Chmod(target, mode)
 			continue
 		}
-		if err := os.WriteFile(target, file.Data, mode); err != nil {
+		if err := l.writeAssetFile(target, file, mode); err != nil {
 			return err
 		}
 	}
@@ -431,14 +437,58 @@ func ensureSubpath(root, target string) error {
 	return nil
 }
 
-func sameFileContent(path string, data []byte) bool {
-	old, err := os.ReadFile(path)
+func (l *runtimeLayout) sameAssetFileContent(target string, file assetFile) (bool, error) {
+	old, err := os.Open(target)
 	if err != nil {
-		return false
+		return false, nil
 	}
-	oldHash := sha256.Sum256(old)
-	newHash := sha256.Sum256(data)
-	return oldHash == newHash
+	defer old.Close()
+
+	source, err := l.Assets.Open(file)
+	if err != nil {
+		return false, err
+	}
+	defer source.Close()
+
+	return sameReaderContent(old, source)
+}
+
+func (l *runtimeLayout) writeAssetFile(target string, file assetFile, mode os.FileMode) (err error) {
+	source, err := l.Assets.Open(file)
+	if err != nil {
+		return err
+	}
+	defer source.Close()
+
+	output, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		closeErr := output.Close()
+		if closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
+
+	if _, err := io.Copy(output, source); err != nil {
+		return err
+	}
+	return output.Chmod(mode)
+}
+
+func sameReaderContent(left io.Reader, right io.Reader) (bool, error) {
+	leftHash := sha256.New()
+	if _, err := io.Copy(leftHash, left); err != nil {
+		return false, err
+	}
+
+	rightHash := sha256.New()
+	if _, err := io.Copy(rightHash, right); err != nil {
+		return false, err
+	}
+
+	return bytes.Equal(leftHash.Sum(nil), rightHash.Sum(nil)), nil
 }
 
 func shortHash(hash string) string {

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io"
 	"io/fs"
 	"path"
 	"path/filepath"
@@ -15,14 +16,15 @@ import (
 var ErrAssetsNotEmbedded = errors.New("sing-box subcore assets are not embedded")
 
 type assetFile struct {
-	Name string
-	Data []byte
+	Name       string
+	SourceName string
 }
 
 type assetSet struct {
 	Files      []assetFile
 	Hash       string
 	Executable string
+	assetFS    fs.FS
 }
 
 func embeddedAvailable() bool {
@@ -31,16 +33,16 @@ func embeddedAvailable() bool {
 }
 
 func loadEmbeddedAssets() (*assetSet, error) {
-	files, err := bundledAssetFiles()
+	assetFS, files, err := bundledAssetFiles()
 	if err != nil {
 		return nil, err
 	}
-	return selectPlatformAssets(files), nil
+	return selectPlatformAssets(assetFS, files)
 }
 
-func selectPlatformAssets(files []assetFile) *assetSet {
+func selectPlatformAssets(assetFS fs.FS, files []assetFile) (*assetSet, error) {
 	if len(files) == 0 {
-		return &assetSet{}
+		return &assetSet{}, nil
 	}
 
 	executable := executableName()
@@ -51,14 +53,14 @@ func selectPlatformAssets(files []assetFile) *assetSet {
 		for _, file := range files {
 			if strings.HasPrefix(file.Name, prefix) {
 				name := strings.TrimPrefix(file.Name, prefix)
-				selected = append(selected, assetFile{Name: name, Data: file.Data})
+				selected = append(selected, assetFile{Name: name, SourceName: file.SourceName})
 				if path.Base(name) == executable {
 					foundExecutable = true
 				}
 			}
 		}
 		if foundExecutable {
-			return newAssetSet(selected, executable)
+			return newAssetSet(assetFS, selected, executable)
 		}
 	}
 
@@ -74,13 +76,13 @@ func selectPlatformAssets(files []assetFile) *assetSet {
 		}
 	}
 	if foundExecutable {
-		return newAssetSet(root, executable)
+		return newAssetSet(assetFS, root, executable)
 	}
 
-	return &assetSet{}
+	return &assetSet{}, nil
 }
 
-func newAssetSet(files []assetFile, executable string) *assetSet {
+func newAssetSet(assetFS fs.FS, files []assetFile, executable string) (*assetSet, error) {
 	sort.Slice(files, func(i, j int) bool {
 		return files[i].Name < files[j].Name
 	})
@@ -93,7 +95,10 @@ func newAssetSet(files []assetFile, executable string) *assetSet {
 		_, _ = hash.Write([]byte{0})
 		_, _ = hash.Write([]byte(file.Name))
 		_, _ = hash.Write([]byte{0})
-		sum := sha256.Sum256(file.Data)
+		sum, err := hashAssetFile(assetFS, file)
+		if err != nil {
+			return nil, err
+		}
 		_, _ = hash.Write(sum[:])
 	}
 
@@ -101,7 +106,28 @@ func newAssetSet(files []assetFile, executable string) *assetSet {
 		Files:      files,
 		Hash:       hex.EncodeToString(hash.Sum(nil)),
 		Executable: executable,
+		assetFS:    assetFS,
+	}, nil
+}
+
+func (a *assetSet) Open(file assetFile) (fs.File, error) {
+	return a.assetFS.Open(file.SourceName)
+}
+
+func hashAssetFile(assetFS fs.FS, file assetFile) ([32]byte, error) {
+	var sum [32]byte
+	source, err := assetFS.Open(file.SourceName)
+	if err != nil {
+		return sum, err
 	}
+	defer source.Close()
+
+	hash := sha256.New()
+	if _, err := io.Copy(hash, source); err != nil {
+		return sum, err
+	}
+	copy(sum[:], hash.Sum(nil))
+	return sum, nil
 }
 
 func executableName() string {
@@ -141,11 +167,7 @@ func walkAssetFS(assetFS fs.FS, root string) ([]assetFile, error) {
 		if rel == "" || isIgnoredAsset(rel) {
 			return nil
 		}
-		data, err := fs.ReadFile(assetFS, name)
-		if err != nil {
-			return err
-		}
-		files = append(files, assetFile{Name: path.Clean(rel), Data: data})
+		files = append(files, assetFile{Name: path.Clean(rel), SourceName: path.Clean(name)})
 		return nil
 	})
 	return files, err
