@@ -7,7 +7,7 @@ on:
         description: "Mihomo version. Leave empty to use current tag or constant.Version"
         required: false
       build_suffix:
-        description: "Build suffix. Leave empty to use b<run_number>.<attempt>"
+        description: "Build suffix. Leave empty to use r<run_number>a<attempt>"
         required: false
       prerelease:
         description: "Mark the GitHub Release as prerelease"
@@ -53,7 +53,7 @@ jobs:
 
           build_suffix="${{ inputs.build_suffix }}"
           if [ -z "${build_suffix}" ]; then
-            build_suffix="b${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+            build_suffix="r${GITHUB_RUN_NUMBER}a${GITHUB_RUN_ATTEMPT}"
           fi
 
           sanitize() {
