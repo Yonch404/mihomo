@@ -64,7 +64,7 @@ jobs:
           sing_box_version="$(sanitize "${sing_box_version}")"
           build_suffix="$(sanitize "${build_suffix}")"
 
-          release_version="${mihomo_version}-sb.${sing_box_version}-${build_suffix}"
+          release_version="v${mihomo_version}-sb.${sing_box_version}-${build_suffix}"
           release_tag="v${release_version}"
 
           echo "mihomo_version=${mihomo_version}" >> "$GITHUB_OUTPUT"
