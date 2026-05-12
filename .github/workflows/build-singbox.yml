@@ -65,7 +65,7 @@ jobs:
           build_suffix="$(sanitize "${build_suffix}")"
 
           release_version="v${mihomo_version}-sb.${sing_box_version}-${build_suffix}"
-          release_tag="v${release_version}"
+          release_tag="${release_version}"
 
           echo "mihomo_version=${mihomo_version}" >> "$GITHUB_OUTPUT"
           echo "sing_box_version=${sing_box_version}" >> "$GITHUB_OUTPUT"
