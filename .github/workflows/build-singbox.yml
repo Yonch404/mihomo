@@ -16,7 +16,7 @@ on:
         type: boolean
 
 env:
-  SING_BOX_VERSION: "1.13.11"
+  SING_BOX_VERSION: "1.13.16"
   MIHOMO_CA_BUNDLE_URL: "https://raw.githubusercontent.com/SagerNet/sing-box/testing/common/certificate/chrome.pem"
 
 jobs:
@@ -112,20 +112,6 @@ jobs:
 
           perl -0pi -e 's/var DisableSystemCa, _ = strconv\.ParseBool\(os\.Getenv\("DISABLE_SYSTEM_CA"\)\)/var DisableSystemCa = true/' component/ca/config.go
           grep -q 'var DisableSystemCa = true' component/ca/config.go
-
-      - name: Fix issue77930 for Golang1.26
-        run: |
-          set -euo pipefail
-          patch_file="$GITHUB_WORKSPACE/.github/patch/issue77930.patch"
-          cd "$(go env GOROOT)"
-          if patch --batch --forward --dry-run -p 1 < "$patch_file"; then
-            patch --verbose --batch --forward -p 1 < "$patch_file"
-          elif patch --batch --reverse --dry-run -p 1 < "$patch_file"; then
-            echo "issue77930 patch already applied; skip"
-          else
-            echo "issue77930 patch cannot be applied cleanly" >&2
-            exit 1
-          fi
 
       - name: Set variables
         run: |

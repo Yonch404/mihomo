@@ -27,7 +27,6 @@ import (
 	"github.com/metacubex/mihomo/component/resource"
 	"github.com/metacubex/mihomo/component/sniffer"
 	"github.com/metacubex/mihomo/component/subcore/singbox"
-	tlsC "github.com/metacubex/mihomo/component/tls"
 	"github.com/metacubex/mihomo/component/trie"
 	"github.com/metacubex/mihomo/component/updater"
 	"github.com/metacubex/mihomo/config"
@@ -168,20 +167,19 @@ func GetGeneral() *config.General {
 			ASN:     geodata.ASNUrl(),
 			GeoSite: geodata.GeoSiteUrl(),
 		},
-		GeoAutoUpdate:           updater.GeoAutoUpdate(),
-		GeoUpdateInterval:       updater.GeoUpdateInterval(),
-		GeodataMode:             geodata.GeodataMode(),
-		GeodataLoader:           geodata.LoaderName(),
-		GeositeMatcher:          geodata.SiteMatcherName(),
-		TCPConcurrent:           dialer.GetTcpConcurrent(),
-		FindProcessMode:         tunnel.FindProcessMode(),
-		Sniffing:                tunnel.IsSniffing(),
-		GlobalClientFingerprint: tlsC.GetGlobalFingerprint(),
-		GlobalUA:                mihomoHttp.UA(),
-		ETagSupport:             resource.ETag(),
-		KeepAliveInterval:       int(keepalive.KeepAliveInterval() / time.Second),
-		KeepAliveIdle:           int(keepalive.KeepAliveIdle() / time.Second),
-		DisableKeepAlive:        keepalive.DisableKeepAlive(),
+		GeoAutoUpdate:     updater.GeoAutoUpdate(),
+		GeoUpdateInterval: updater.GeoUpdateInterval(),
+		GeodataMode:       geodata.GeodataMode(),
+		GeodataLoader:     geodata.LoaderName(),
+		GeositeMatcher:    geodata.SiteMatcherName(),
+		TCPConcurrent:     dialer.GetTcpConcurrent(),
+		FindProcessMode:   tunnel.FindProcessMode(),
+		Sniffing:          tunnel.IsSniffing(),
+		GlobalUA:          mihomoHttp.UA(),
+		ETagSupport:       resource.ETag(),
+		KeepAliveInterval: int(keepalive.KeepAliveInterval() / time.Second),
+		KeepAliveIdle:     int(keepalive.KeepAliveIdle() / time.Second),
+		DisableKeepAlive:  keepalive.DisableKeepAlive(),
 	}
 
 	return general
@@ -231,10 +229,11 @@ func updateNTP(c *config.NTP) {
 			net.JoinHostPort(c.Server, strconv.Itoa(c.Port)),
 			time.Duration(c.Interval),
 			c.DialerProxy,
+			tunnel.Tunnel,
 			c.WriteToSystem,
 		)
 	} else {
-		ntp.ReCreateNTPService("", 0, "", false)
+		ntp.ReCreateNTPService("", 0, "", nil, false)
 	}
 }
 
@@ -245,7 +244,7 @@ func updateDNS(c *config.DNS, generalIPv6 bool) {
 		resolver.DefaultService = nil
 		resolver.ProxyServerHostResolver = nil
 		resolver.DirectHostResolver = nil
-		dns.ReCreateServer("", nil)
+		dns.ReCreateServer("", nil, nil)
 		return
 	}
 
@@ -257,6 +256,7 @@ func updateDNS(c *config.DNS, generalIPv6 bool) {
 		IPv6Timeout:          c.IPv6Timeout,
 		FallbackIPFilter:     c.FallbackIPFilter,
 		FallbackDomainFilter: c.FallbackDomainFilter,
+		FallbackLazyQuery:    c.FallbackLazyQuery,
 		Default:              c.DefaultNameserver,
 		Policy:               c.NameServerPolicy,
 		ProxyServer:          c.ProxyServerNameserver,
@@ -281,7 +281,7 @@ func updateDNS(c *config.DNS, generalIPv6 bool) {
 		m.PatchFrom(old.(*dns.ResolverEnhancer))
 	}
 
-	s := dns.NewService(r.Resolver, m)
+	s := dns.NewService(r, m)
 
 	resolver.DefaultResolver = r
 	resolver.DefaultHostMapper = m
@@ -300,7 +300,9 @@ func updateDNS(c *config.DNS, generalIPv6 bool) {
 		resolver.DirectHostResolver = r.Resolver
 	}
 
-	dns.ReCreateServer(c.Listen, s)
+	lc := inbound.NewListenConfig()
+	lc.SetRouteMark(c.ListenRoutingMark)
+	dns.ReCreateServer(c.Listen, lc, s)
 }
 
 func updateHosts(tree *trie.DomainTrie[resolver.HostValue]) {
@@ -432,11 +434,6 @@ func updateGeneral(general *config.General, logging bool) {
 	geodata.SetASNUrl(general.GeoXUrl.ASN)
 	mihomoHttp.SetUA(general.GlobalUA)
 	resource.SetETag(general.ETagSupport)
-
-	if general.GlobalClientFingerprint != "" {
-		log.Warnln("The `global-client-fingerprint` configuration is deprecated, please set `client-fingerprint` directly on the proxy instead")
-	}
-	tlsC.SetGlobalFingerprint(general.GlobalClientFingerprint)
 }
 
 func updateUsers(users []auth.AuthUser) {
