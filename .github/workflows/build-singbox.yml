@@ -16,7 +16,7 @@ on:
         type: boolean
 
 env:
-  SING_BOX_VERSION: "1.13.16"
+  SING_BOX_VERSION: "1.14.2"
   MIHOMO_CA_BUNDLE_URL: "https://raw.githubusercontent.com/SagerNet/sing-box/testing/common/certificate/chrome.pem"
 
 jobs:

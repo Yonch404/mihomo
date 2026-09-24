@@ -65,14 +65,17 @@ func (u *CoreUpdater) coreBaseName(prefix string) string {
 		if runtime.GOOS == "android" {
 			// mihomo-android-arm64-v8
 			return fmt.Sprintf("%s-%s-%s-v8", prefix, runtime.GOOS, runtime.GOARCH)
-		} else {
-			// mihomo-linux-arm64
-			return fmt.Sprintf("%s-%s-%s", prefix, runtime.GOOS, runtime.GOARCH)
 		}
+		// mihomo-linux-arm64
+		return fmt.Sprintf("%s-%s-%s", prefix, runtime.GOOS, runtime.GOARCH)
 	case "mips", "mipsle":
 		// mihomo-linux-mips-hardfloat
 		return fmt.Sprintf("%s-%s-%s-%s", prefix, runtime.GOOS, runtime.GOARCH, features.GOMIPS)
 	case "amd64":
+		if runtime.GOOS == "android" {
+			// mihomo-android-amd64
+			return fmt.Sprintf("%s-%s-%s", prefix, runtime.GOOS, runtime.GOARCH)
+		}
 		// mihomo-linux-amd64-v1
 		return fmt.Sprintf("%s-%s-%s-%s", prefix, runtime.GOOS, runtime.GOARCH, features.GOAMD64)
 	default:
